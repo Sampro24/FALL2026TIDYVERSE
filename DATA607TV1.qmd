@@ -1,0 +1,194 @@
+---
+title: "DATA607TV1"
+author: "Samantha Mesa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+## Introduction
+
+This vignette demonstrates the use of core Tidyverse packages on a real dataset: readr to import the CSV, dplyr for data processing and summarization (mutate(), case_when(), group_by(), summarise(), across(), arrange(), slice_max(), count()), tidyr to reshape it with pivot_longer(), and ggplot2 to visualize the results. It uses Kaggle’s Social Media Usage Dataset, which includes 1,000 users, the app each user uses, and their daily minutes, posts, likes, and follows. with the question of which apps get the most engagement and whether more time spent equals more activity.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## 1. Load packages and data
+
+```{r load}
+library(tidyverse)
+
+social <- read_csv("https://raw.githubusercontent.com/Sampro24/DATA607Homeworks/main/social_media_usage.csv")
+
+glimpse(social)
+```
+
+`glimpse()` gives a compact view of every column and its type.
+
+## 2. Check data quality
+
+```{r quality}
+# Missing values per column, using across() inside summarise()
+social %>%
+  summarise(across(everything(), ~ sum(is.na(.x))))
+
+# Duplicate user IDs?
+social %>% count(User_ID) %>% filter(n > 1)
+
+# Quick numeric summary
+social %>%
+  select(where(is.numeric)) %>%
+  summary()
+```
+
+## 3. Summarize by app with `group_by()` and `summarise()`
+
+```{r by-app}
+app_summary <- social %>%
+  group_by(App) %>%
+  summarise(
+    users          = n(),
+    avg_minutes    = mean(Daily_Minutes_Spent),
+    avg_posts      = mean(Posts_Per_Day),
+    avg_likes      = mean(Likes_Per_Day),
+    avg_follows    = mean(Follows_Per_Day),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(avg_minutes))
+
+app_summary
+```
+
+Use `across()` to apply the same summary to several columns at once:
+
+```{r across}
+social %>%
+  group_by(App) %>%
+  summarise(across(c(Daily_Minutes_Spent, Posts_Per_Day, Likes_Per_Day, Follows_Per_Day),
+                   list(mean = mean, sd = sd),
+                   .names = "{.col}_{.fn}")) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 1)))
+```
+
+## 4. Create new variables with `mutate()` and `case_when()`
+
+We build a total-activity measure and bucket users by time spent.
+
+```{r mutate}
+social <- social %>%
+  mutate(
+    total_activity = Posts_Per_Day + Likes_Per_Day + Follows_Per_Day,
+    usage_level = case_when(
+      Daily_Minutes_Spent < 60  ~ "Light (<1 hr)",
+      Daily_Minutes_Spent < 180 ~ "Moderate (1-3 hrs)",
+      TRUE                      ~ "Heavy (3+ hrs)"
+    ),
+    usage_level = factor(usage_level,
+                         levels = c("Light (<1 hr)", "Moderate (1-3 hrs)", "Heavy (3+ hrs)"))
+  )
+
+social %>% count(usage_level)
+```
+
+Cross-tabulate app by usage level and compute proportions:
+
+```{r prop}
+social %>%
+  count(App, usage_level) %>%
+  group_by(App) %>%
+  mutate(share = round(n / sum(n), 3)) %>%
+  ungroup()
+```
+
+## 5. Find top users with `slice_max()`
+
+```{r slice}
+# Top 3 most active users on each app
+social %>%
+  group_by(App) %>%
+  slice_max(total_activity, n = 3, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(App, User_ID, Daily_Minutes_Spent, total_activity)
+```
+
+## 6. Reshape with tidyr and visualize with ggplot2
+
+### 6.1 Average minutes per app
+
+```{r plot-minutes}
+app_summary %>%
+  ggplot(aes(x = fct_reorder(App, avg_minutes), y = avg_minutes)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Average Daily Minutes by App",
+       x = NULL, y = "Average minutes per day") +
+  theme_minimal()
+```
+
+### 6.2 Compare engagement types across apps
+
+`pivot_longer()` turns the wide activity columns into a long format, which is what ggplot2 prefers for faceting and grouping.
+
+```{r plot-long}
+activity_long <- social %>%
+  pivot_longer(cols = c(Posts_Per_Day, Likes_Per_Day, Follows_Per_Day),
+               names_to = "activity_type",
+               values_to = "count") %>%
+  mutate(activity_type = str_remove(activity_type, "_Per_Day"))
+
+activity_long %>%
+  group_by(App, activity_type) %>%
+  summarise(avg_count = mean(count), .groups = "drop") %>%
+  ggplot(aes(x = App, y = avg_count, fill = activity_type)) +
+  geom_col(position = "dodge") +
+  labs(title = "Average Daily Posts, Likes, and Follows by App",
+       x = NULL, y = "Average per day", fill = "Activity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+### 6.3 Does more time mean more activity?
+
+```{r plot-scatter}
+ggplot(social, aes(x = Daily_Minutes_Spent, y = total_activity)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(method = "lm", se = TRUE, color = "firebrick") +
+  facet_wrap(~ App) +
+  labs(title = "Time Spent vs. Total Daily Activity",
+       x = "Daily minutes", y = "Posts + Likes + Follows") +
+  theme_minimal()
+
+# Correlation by app
+social %>%
+  group_by(App) %>%
+  summarise(correlation = round(cor(Daily_Minutes_Spent, total_activity), 3),
+            .groups = "drop") %>%
+  arrange(desc(abs(correlation)))
+```
+
+### 6.4 Distribution of time spent
+
+```{r plot-box}
+ggplot(social, aes(x = fct_reorder(App, Daily_Minutes_Spent, .fun = median),
+                   y = Daily_Minutes_Spent)) +
+  geom_boxplot(fill = "lightgreen") +
+  coord_flip() +
+  labs(title = "Distribution of Daily Minutes by App", x = NULL, y = "Minutes per day") +
+  theme_minimal()
+```
+
+## 7. Conclusion
+
+This vignette showed how a few Tidyverse functions can take a dataset from import to insight in a single, readable pipeline. In terms of engagement, Instagram had the highest average daily time (around 264 minutes) and most posts and follows per day, but the differences between apps were small . Average daily minutes varied only from around 233 (TikTok) to 264 (Instagram), which is small compared with the approximately 150-minute standard deviation within each app. More time didn’t mean more activity either: the correlation between daily minutes and total activity was close to zero for each app (between roughly -0.06 and 0.09). Overall, it seems the app a person uses matters far less than the user themselves, and the lack of any real pattern suggests this dataset may be synthetic.
+
+Using only a handful of TidyVerse functions, we show imported, cleaned, summarized, reshaped, and visualized the data in a readable pipeline:
+
+- `group_by()` + `summarise()` quickly compared apps on average time and engagement.
+- `mutate()` + `case_when()` created a total-activity measure and usage-level categories.
+- `slice_max()` surfaced the most active users per app.
+- `pivot_longer()` made it easy to plot several engagement metrics at once.
+- `ggplot2` turned the results into clear comparisons.
+
+## References
+
+- Dataset: Bhadra Mohit, *Social Media Usage Dataset*, Kaggle.
+- Data copy used for reproducibility: [GitHub repository](https://github.com/Sampro24/DATA607Homeworks/blob/main/social_media_usage.csv)
